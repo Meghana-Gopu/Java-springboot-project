@@ -15,7 +15,7 @@ jobs:
         uses: actions/checkout@v4
 
 
-      # 2️⃣ Prepare EC2 (install Java, Maven, Git)
+      # 2️⃣ Prepare EC2
       - name: Prepare EC2
         uses: appleboy/ssh-action@v1.1.0
         with:
@@ -26,7 +26,7 @@ jobs:
             sudo yum install -y git maven java-17-amazon-corretto
 
 
-      # 3️⃣ Clone or pull repo on EC2
+      # 3️⃣ Clone / Pull repo
       - name: Clone / Pull Repository
         uses: appleboy/ssh-action@v1.1.0
         with:
@@ -51,7 +51,7 @@ jobs:
             fi
 
 
-      # 4️⃣ Build Maven app
+      # 4️⃣ Build Application
       - name: Build Maven Application
         uses: appleboy/ssh-action@v1.1.0
         with:
@@ -63,44 +63,23 @@ jobs:
             mvn clean package -DskipTests -U
 
 
-      # 5️⃣ Stop old application safely (Fixed 143 Error)
+      # 5️⃣ Stop Old Application (FIXED 143 ERROR)
       - name: Stop Old Application
         uses: appleboy/ssh-action@v1.1.0
+        continue-on-error: true
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ec2-user
           key: ${{ secrets.EC2_KEY }}
-          script_stop: false
           script: |
             echo "Stopping old application..."
-
-            PIDS=$(pgrep -f "datastore-0.0.7.jar" || true)
-
-            if [ -n "$PIDS" ]; then
-              echo "Stopping application PIDs: $PIDS"
-
-              for PID in $PIDS; do
-                kill -15 $PID || true
-              done
-
-              sleep 5
-
-              for PID in $PIDS; do
-                if ps -p $PID > /dev/null; then
-                  echo "Force killing PID $PID"
-                  kill -9 $PID || true
-                fi
-              done
-
-              echo "Application stopped"
-            else
-              echo "No running application found"
-            fi
-
-            exit 0
+            pkill -f datastore-0.0.7.jar || true
+            sleep 5
+            pkill -9 -f datastore-0.0.7.jar || true
+            echo "Old application stopped"
 
 
-      # 6️⃣ Start new application
+      # 6️⃣ Start Application
       - name: Start Application
         uses: appleboy/ssh-action@v1.1.0
         with:
@@ -128,7 +107,7 @@ jobs:
             echo "Application started"
 
 
-      # 7️⃣ Wait for app startup
+      # 7️⃣ Wait for Startup
       - name: Wait for App Startup
         uses: appleboy/ssh-action@v1.1.0
         with:
@@ -140,7 +119,7 @@ jobs:
             sleep 40
 
 
-      # 8️⃣ Verify Application Running
+      # 8️⃣ Verify Application
       - name: Verify Application
         uses: appleboy/ssh-action@v1.1.0
         with:

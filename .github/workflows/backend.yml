@@ -11,11 +11,12 @@ jobs:
 
     steps:
 
-      # 1️⃣ Checkout
+      # 1️⃣ Checkout Repository
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 2️⃣ Prepare EC2
+
+      # 2️⃣ Prepare EC2 (Install dependencies if missing)
       - name: Prepare EC2
         uses: appleboy/ssh-action@v1.1.0
         with:
@@ -25,22 +26,28 @@ jobs:
           script: |
             set -e
 
-            echo "Installing dependencies if missing..."
+            echo "🔍 Checking required tools..."
 
             if ! command -v git &>/dev/null; then
+              echo "📦 Installing git..."
               sudo yum install -y git
             fi
 
             if ! command -v mvn &>/dev/null; then
+              echo "📦 Installing maven..."
               sudo yum install -y maven
             fi
 
             if ! java -version &>/dev/null 2>&1; then
+              echo "📦 Installing Java 17..."
               sudo yum install -y java-17-amazon-corretto
             fi
 
-      # 3️⃣ Clone / Pull
-      - name: Clone Repo
+            echo "✅ All dependencies are ready."
+
+
+      # 3️⃣ Clone or Pull Repo
+      - name: Clone / Pull Repository
         uses: appleboy/ssh-action@v1.1.0
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -50,22 +57,27 @@ jobs:
             set -e
 
             APP_DIR=/home/ec2-user/app
-            REPO=Java-springboot-project
-            URL=https://github.com/CloudTechDevOps/Java-springboot-project.git
+            REPO_NAME=Java-springboot-project
+            REPO_URL=https://github.com/CloudTechDevOps/Java-springboot-project.git
 
-            mkdir -p $APP_DIR
+            mkdir -p "$APP_DIR"
 
-            if [ -d "$APP_DIR/$REPO/.git" ]; then
-              cd $APP_DIR/$REPO
+            if [ -d "$APP_DIR/$REPO_NAME/.git" ]; then
+              echo "🔄 Pulling latest code..."
+              cd "$APP_DIR/$REPO_NAME"
               git reset --hard
               git pull origin main
             else
-              cd $APP_DIR
-              git clone $URL
+              echo "📥 Cloning repository..."
+              cd "$APP_DIR"
+              git clone "$REPO_URL"
             fi
 
-      # 4️⃣ Build
-      - name: Build Application
+            echo "✅ Repository is up to date."
+
+
+      # 4️⃣ Build Application
+      - name: Build Maven Application
         uses: appleboy/ssh-action@v1.1.0
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -74,8 +86,15 @@ jobs:
           script: |
             set -e
 
-            cd /home/ec2-user/app/Java-springboot-project/backend
-            mvn clean package -DskipTests
+            BUILD_DIR=/home/ec2-user/app/Java-springboot-project/backend
+
+            echo "🔨 Building application..."
+            cd "$BUILD_DIR"
+            mvn clean package -DskipTests -U
+
+            echo "✅ Build successful."
+            ls -lh target/*.jar
+
 
       # 5️⃣ Stop Service
       - name: Stop Service
@@ -85,8 +104,10 @@ jobs:
           username: ec2-user
           key: ${{ secrets.EC2_KEY }}
           script: |
-            echo "Stopping service..."
+            echo "🛑 Stopping backend service..."
             sudo systemctl stop backend || true
+            sleep 5
+
 
       # 6️⃣ Start Service
       - name: Start Service
@@ -100,16 +121,18 @@ jobs:
           username: ec2-user
           key: ${{ secrets.EC2_KEY }}
           script: |
-            echo "Starting service..."
+            echo "🚀 Starting backend service..."
 
             sudo systemctl daemon-reload
             sudo systemctl start backend
 
             sleep 5
 
-            sudo systemctl status backend
+            echo "📊 Service Status:"
+            sudo systemctl status backend --no-pager
 
-      # 7️⃣ Health Check
+
+      # 7️⃣ Health Check (Improved Version)
       - name: Health Check
         uses: appleboy/ssh-action@v1.1.0
         with:
@@ -117,21 +140,56 @@ jobs:
           username: ec2-user
           key: ${{ secrets.EC2_KEY }}
           script: |
-            echo "Checking health..."
+            echo "⏳ Checking application health..."
 
-            RETRIES=12
+            RETRIES=30
             COUNT=0
 
             until curl -sf http://localhost:8084/actuator/health > /dev/null; do
+
               COUNT=$((COUNT+1))
 
               if [ "$COUNT" -ge "$RETRIES" ]; then
-                echo "App failed to start"
-                sudo systemctl status backend
+                echo "❌ App failed to start"
+                echo "🔎 Service Status:"
+                sudo systemctl status backend --no-pager
+
+                echo "📜 Last logs:"
+                sudo journalctl -u backend -n 50 --no-pager
+
                 exit 1
               fi
 
+              echo "⏳ Waiting... attempt $COUNT/$RETRIES"
               sleep 5
             done
 
-            echo "Deployment successful!"
+            echo "✅ Application is healthy!"
+
+
+      # 8️⃣ Final Verification
+      - name: Final Verification
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_KEY }}
+          script: |
+            echo "🔍 Final verification..."
+
+            if sudo systemctl is-active --quiet backend; then
+              echo "✅ Service is running"
+            else
+              echo "❌ Service not running"
+              exit 1
+            fi
+
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8084/actuator/health || echo "000")
+
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "✅ Health endpoint OK"
+            else
+              echo "⚠️ Health endpoint returned $HTTP_CODE"
+            fi
+
+            echo "🎉 Deployment successful!"

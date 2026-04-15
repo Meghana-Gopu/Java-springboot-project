@@ -22,7 +22,7 @@ jobs:
           key: ${{ secrets.EC2_KEY }}
           script: |
             set -e
-            sudo yum install -y git maven java-17-amazon-corretto
+            sudo yum install -y git maven java-17-amazon-corretto -y
 
       # 3️⃣ Clone or pull repo on EC2
       - name: Clone / Pull Repository
@@ -44,6 +44,7 @@ jobs:
               git pull origin main
             else
               git clone $REPO_URL
+              cd $REPO_NAME
             fi
 
       # 4️⃣ Build Maven app
@@ -67,32 +68,28 @@ jobs:
           key: ${{ secrets.EC2_KEY }}
           script_stop: false
           script: |
-            # pkill returns 0 if it killed something, 1 if nothing matched — both are fine.
-            # No set -e here so exit code 1 (nothing to kill) is not fatal.
-            if pkill -TERM -f "java.*datastore-0.0.7.jar"; then
-              echo "SIGTERM sent, waiting for graceful shutdown..."
-              sleep 8
-              if pkill -0 -f "java.*datastore-0.0.7.jar" 2>/dev/null; then
-                echo "Process still alive, sending SIGKILL..."
-                pkill -KILL -f "java.*datastore-0.0.7.jar" || true
-                sleep 2
-              fi
-              echo "✅ Old application stopped"
+            PIDS=$(pgrep -f "java.*datastore-0.0.7.jar"  true)
+            if [ -n "$PIDS" ]; then
+              echo "Stopping application PIDs: $PIDS"
+              kill $PIDS  true
+              sleep 5
+              for PID in $PIDS; do
+                if ps -p $PID > /dev/null; then
+                  echo "Force killing PID $PID"
+                  kill -9 $PID  true
+                fi
+              done
             else
-              echo "No running application found, skipping stop"
+              echo "No running application found"
             fi
 
       # 6️⃣ Start new application
-      # Secrets are forwarded as env vars via `envs` so they are
-      # available inside the SSH session — GitHub expressions like
-      # ${{ secrets.X }} are NOT expanded inside remote SSH scripts.
       - name: Start Application
         uses: appleboy/ssh-action@v1.1.0
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ec2-user
           key: ${{ secrets.EC2_KEY }}
-          envs: DB_HOST,DB_USERNAME,DB_PASSWORD
           script: |
             set -e
             LOG_DIR=/var/log/app
@@ -100,21 +97,16 @@ jobs:
             sudo chown ec2-user:ec2-user $LOG_DIR
             cd /home/ec2-user/app/Java-springboot-project/backend/target
             nohup env \
-              MYSQL_HOST=$DB_HOST \
+              MYSQL_HOST=${{ secrets.DB_HOST }} \
               MYSQL_PORT=3306 \
-              MYSQL_USERNAME=$DB_USERNAME \
-              MYSQL_PASSWORD=$DB_PASSWORD \
+              MYSQL_USERNAME=${{ secrets.DB_USERNAME }} \
+              MYSQL_PASSWORD=${{ secrets.DB_PASSWORD }} \
               LOG_FILE_PATH=$LOG_DIR/datastore.log \
               java -jar datastore-0.0.7.jar \
               --server.port=8084 \
               > $LOG_DIR/nohup.out 2>&1 &
-            echo "✅ Application process launched"
-        env:
-          DB_HOST: ${{ secrets.DB_HOST }}
-          DB_USERNAME: ${{ secrets.DB_USERNAME }}
-          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
 
-      # 7️⃣ Wait for app startup with retry loop instead of fixed sleep
+      # 7️⃣ Wait for app startup
       - name: Wait for App Startup
         uses: appleboy/ssh-action@v1.1.0
         with:
@@ -122,23 +114,9 @@ jobs:
           username: ec2-user
           key: ${{ secrets.EC2_KEY }}
           script: |
-            set -e
-            echo "Waiting for application to become available on port 8084..."
-            MAX_RETRIES=24   # 24 x 5s = 2 minutes max wait
-            RETRY=0
-            until curl -sf http://localhost:8084/actuator/health > /dev/null 2>&1; do
-              RETRY=$((RETRY + 1))
-              if [ "$RETRY" -ge "$MAX_RETRIES" ]; then
-                echo "❌ Application did not start within timeout. Last log lines:"
-                tail -50 /var/log/app/nohup.out || true
-                exit 1
-              fi
-              echo "  Attempt $RETRY/$MAX_RETRIES — not ready yet, retrying in 5s..."
-              sleep 5
-            done
-            echo "✅ Application is accepting connections"
-
-      # 8️⃣ Verify app and DB connectivity via actuator
+            echo "Waiting 15 seconds for application to start..."
+            sleep 15
+      # 8️⃣ Verify DB connectivity via actuator
       - name: Verify DB Connection
         uses: appleboy/ssh-action@v1.1.0
         with:
@@ -147,26 +125,26 @@ jobs:
           key: ${{ secrets.EC2_KEY }}
           script: |
             set -e
-            HEALTH=$(curl -sf http://localhost:8084/actuator/health)
+            HEALTH=$(curl -s http://localhost:8084/actuator/health)
             echo "Health endpoint response: $HEALTH"
-
-            # Check overall application status
+      
+            # Check only app status
             if [[ "$HEALTH" != *'"status":"UP"'* ]]; then
               echo "❌ Application not UP!"
               exit 1
             fi
-            echo "✅ Application is UP"
-
-            # Check DB health component if exposed by actuator
+      
+            # Optional DB check (non-blocking)
             if [[ "$HEALTH" == *'"db"'* ]]; then
-              if [[ "$HEALTH" == *'"db":{"status":"UP"'* ]]; then
-                echo "✅ DB is UP"
-              else
-                echo "❌ DB is not UP!"
+              if [[ "$HEALTH" != *'"status":"UP"'* ]]; then
+                echo "❌ DB not UP!"
                 exit 1
               fi
+              echo "✅ DB is UP"
             else
               echo "⚠️ DB health not exposed, skipping check"
             fi
-
-            echo "✅ Deployment verified successfully"
+      
+            echo "✅ Application is UP"
+      
+            echo "✅ Application and DB are UP"

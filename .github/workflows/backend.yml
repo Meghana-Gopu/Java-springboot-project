@@ -8,14 +8,14 @@ on:
 jobs:
   build-deploy:
     runs-on: ubuntu-latest
+
     steps:
 
       # 1️⃣ Checkout code
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-
-      # 2️⃣ Prepare EC2
+      # 2️⃣ Prepare EC2 — install deps only if missing
       - name: Prepare EC2
         uses: appleboy/ssh-action@v1.1.0
         with:
@@ -23,10 +23,28 @@ jobs:
           username: ec2-user
           key: ${{ secrets.EC2_KEY }}
           script: |
-            sudo yum install -y git maven java-17-amazon-corretto
+            set -e
 
+            echo "🔍 Checking required tools..."
 
-      # 3️⃣ Clone / Pull repo
+            if ! command -v git &>/dev/null; then
+              echo "📦 Installing git..."
+              sudo yum install -y git
+            fi
+
+            if ! command -v mvn &>/dev/null; then
+              echo "📦 Installing maven..."
+              sudo yum install -y maven
+            fi
+
+            if ! java -version &>/dev/null 2>&1; then
+              echo "📦 Installing Java 17..."
+              sudo yum install -y java-17-amazon-corretto
+            fi
+
+            echo "✅ All dependencies are ready."
+
+      # 3️⃣ Clone or Pull repo
       - name: Clone / Pull Repository
         uses: appleboy/ssh-action@v1.1.0
         with:
@@ -34,22 +52,26 @@ jobs:
           username: ec2-user
           key: ${{ secrets.EC2_KEY }}
           script: |
+            set -e
+
             APP_DIR=/home/ec2-user/app
             REPO_NAME=Java-springboot-project
             REPO_URL=https://github.com/CloudTechDevOps/Java-springboot-project.git
 
-            mkdir -p $APP_DIR
-            cd $APP_DIR
+            mkdir -p "$APP_DIR"
 
-            if [ -d "$REPO_NAME/.git" ]; then
-              cd $REPO_NAME
+            if [ -d "$APP_DIR/$REPO_NAME/.git" ]; then
+              echo "🔄 Pulling latest code..."
+              cd "$APP_DIR/$REPO_NAME"
               git reset --hard
               git pull origin main
             else
-              git clone $REPO_URL
-              cd $REPO_NAME
+              echo "📥 Cloning repository..."
+              cd "$APP_DIR"
+              git clone "$REPO_URL"
             fi
 
+            echo "✅ Repository is up to date."
 
       # 4️⃣ Build Application
       - name: Build Maven Application
@@ -59,25 +81,42 @@ jobs:
           username: ec2-user
           key: ${{ secrets.EC2_KEY }}
           script: |
-            cd /home/ec2-user/app/Java-springboot-project/backend
+            set -e
+
+            BUILD_DIR=/home/ec2-user/app/Java-springboot-project/backend
+
+            echo "🔨 Building application..."
+            cd "$BUILD_DIR"
             mvn clean package -DskipTests -U
 
+            echo "✅ Build successful."
+            ls -lh target/*.jar
 
-      # 5️⃣ Stop Old Application (FIXED 143 ERROR)
+      # 5️⃣ Stop Old Application
       - name: Stop Old Application
         uses: appleboy/ssh-action@v1.1.0
-        continue-on-error: true
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ec2-user
           key: ${{ secrets.EC2_KEY }}
           script: |
-            echo "Stopping old application..."
-            pkill -f datastore-0.0.7.jar || true
-            sleep 5
-            pkill -9 -f datastore-0.0.7.jar || true
-            echo "Old application stopped"
+            echo "🛑 Stopping old application (if running)..."
 
+            # Graceful stop first
+            pkill -f "datastore-0.0.7.jar" || true
+            sleep 5
+
+            # Force kill if still alive
+            if pgrep -f "datastore-0.0.7.jar" > /dev/null; then
+              echo "⚠️  Force killing lingering process..."
+              pkill -9 -f "datastore-0.0.7.jar" || true
+              sleep 2
+            fi
+
+            # Also free up port 8084 if something else is holding it
+            fuser -k 8084/tcp || true
+
+            echo "✅ Port 8084 is free."
 
       # 6️⃣ Start Application
       - name: Start Application
@@ -86,28 +125,38 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ec2-user
           key: ${{ secrets.EC2_KEY }}
+          # ⚠️  Secrets are injected as env vars — never inline them in the script
+          envs: DB_HOST,DB_USERNAME,DB_PASSWORD
           script: |
+            set -e
+
             LOG_DIR=/var/log/app
+            JAR_PATH=/home/ec2-user/app/Java-springboot-project/backend/target/datastore-0.0.7.jar
 
-            sudo mkdir -p $LOG_DIR
-            sudo chown ec2-user:ec2-user $LOG_DIR
+            sudo mkdir -p "$LOG_DIR"
+            sudo chown ec2-user:ec2-user "$LOG_DIR"
 
-            cd /home/ec2-user/app/Java-springboot-project/backend/target
+            # Verify JAR exists before launching
+            if [ ! -f "$JAR_PATH" ]; then
+              echo "❌ JAR not found at $JAR_PATH"
+              exit 1
+            fi
 
-            nohup env \
-              MYSQL_HOST=${{ secrets.DB_HOST }} \
-              MYSQL_PORT=3306 \
-              MYSQL_USERNAME=${{ secrets.DB_USERNAME }} \
-              MYSQL_PASSWORD=${{ secrets.DB_PASSWORD }} \
-              LOG_FILE_PATH=$LOG_DIR/datastore.log \
-              java -jar datastore-0.0.7.jar \
+            echo "🚀 Starting application..."
+            nohup java -jar "$JAR_PATH" \
               --server.port=8084 \
-              > $LOG_DIR/nohup.out 2>&1 &
+              --spring.datasource.url=jdbc:mysql://${DB_HOST}:3306/mydb \
+              --spring.datasource.username="${DB_USERNAME}" \
+              --spring.datasource.password="${DB_PASSWORD}" \
+              > "$LOG_DIR/nohup.out" 2>&1 &
 
-            echo "Application started"
+            echo "✅ Application launched (PID: $!)"
+        env:
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_USERNAME: ${{ secrets.DB_USERNAME }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
 
-
-      # 7️⃣ Wait for Startup
+      # 7️⃣ Wait for Startup — poll instead of blind sleep
       - name: Wait for App Startup
         uses: appleboy/ssh-action@v1.1.0
         with:
@@ -115,9 +164,24 @@ jobs:
           username: ec2-user
           key: ${{ secrets.EC2_KEY }}
           script: |
-            echo "Waiting for application to start..."
-            sleep 40
+            echo "⏳ Waiting for application to become ready..."
 
+            RETRIES=12   # 12 × 5s = 60s max wait
+            COUNT=0
+
+            until curl -sf http://localhost:8084/actuator/health > /dev/null 2>&1; do
+              COUNT=$((COUNT + 1))
+              if [ "$COUNT" -ge "$RETRIES" ]; then
+                echo "❌ App did not respond after 60 seconds."
+                echo "---- Last 30 log lines ----"
+                tail -n 30 /var/log/app/nohup.out || true
+                exit 1
+              fi
+              echo "  Attempt $COUNT/$RETRIES — not ready yet, retrying in 5s..."
+              sleep 5
+            done
+
+            echo "✅ Application is up and healthy!"
 
       # 8️⃣ Verify Application
       - name: Verify Application
@@ -127,12 +191,20 @@ jobs:
           username: ec2-user
           key: ${{ secrets.EC2_KEY }}
           script: |
-            echo "Checking if application is running..."
+            echo "🔍 Final verification..."
 
-            if pgrep -f "datastore-0.0.7.jar" > /dev/null
-            then
-              echo "✅ Application started successfully"
+            if pgrep -f "datastore-0.0.7.jar" > /dev/null; then
+              echo "✅ Process check passed."
             else
-              echo "❌ Application failed to start"
+              echo "❌ Process not found!"
               exit 1
             fi
+
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8084/actuator/health || echo "000")
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "✅ Health endpoint returned HTTP 200."
+            else
+              echo "⚠️  Health endpoint returned HTTP $HTTP_CODE (non-200)."
+            fi
+
+            echo "🎉 Backend deployed successfully on port 8084."

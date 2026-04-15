@@ -36,6 +36,7 @@ GitHub Secrets are sensitive values that must be configured in your repository s
 
 
 
+
 ## Step-by-Step Configuration
 
 ### Step 1: Add SonarQube Secrets

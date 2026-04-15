@@ -68,19 +68,21 @@ jobs:
           key: ${{ secrets.EC2_KEY }}
           script_stop: false
           script: |
-            PIDS=$(pgrep -f "java.*datastore-0.0.7.jar" || true)
-            if [ -n "$PIDS" ]; then
-              echo "Stopping application PIDs: $PIDS"
-              kill $PIDS || true
-              sleep 5
-              for PID in $PIDS; do
-                if ps -p $PID > /dev/null 2>&1; then
-                  echo "Force killing PID $PID"
-                  kill -9 $PID || true
-                fi
-              done
+            # Use pkill to send SIGTERM to all matching processes at once.
+            # pkill exits 0 if it killed something, 1 if nothing matched — both are fine here.
+            # We do NOT use set -e in this step so exit code 1 (no process) is not fatal.
+            if pkill -TERM -f "java.*datastore-0.0.7.jar"; then
+              echo "SIGTERM sent, waiting for graceful shutdown..."
+              sleep 8
+              # Force-kill any survivors with SIGKILL
+              if pkill -0 -f "java.*datastore-0.0.7.jar" 2>/dev/null; then
+                echo "Process still alive, sending SIGKILL..."
+                pkill -KILL -f "java.*datastore-0.0.7.jar" || true
+                sleep 2
+              fi
+              echo "✅ Old application stopped"
             else
-              echo "No running application found"
+              echo "No running application found, skipping stop"
             fi
 
       # 6️⃣ Start new application

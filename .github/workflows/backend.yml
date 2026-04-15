@@ -9,9 +9,11 @@ jobs:
   build-deploy:
     runs-on: ubuntu-latest
     steps:
+
       # 1️⃣ Checkout code
       - name: Checkout Repository
         uses: actions/checkout@v4
+
 
       # 2️⃣ Prepare EC2 (install Java, Maven, Git)
       - name: Prepare EC2
@@ -22,6 +24,7 @@ jobs:
           key: ${{ secrets.EC2_KEY }}
           script: |
             sudo yum install -y git maven java-17-amazon-corretto
+
 
       # 3️⃣ Clone or pull repo on EC2
       - name: Clone / Pull Repository
@@ -34,10 +37,10 @@ jobs:
             APP_DIR=/home/ec2-user/app
             REPO_NAME=Java-springboot-project
             REPO_URL=https://github.com/CloudTechDevOps/Java-springboot-project.git
-            
+
             mkdir -p $APP_DIR
             cd $APP_DIR
-            
+
             if [ -d "$REPO_NAME/.git" ]; then
               cd $REPO_NAME
               git reset --hard
@@ -46,6 +49,7 @@ jobs:
               git clone $REPO_URL
               cd $REPO_NAME
             fi
+
 
       # 4️⃣ Build Maven app
       - name: Build Maven Application
@@ -58,7 +62,8 @@ jobs:
             cd /home/ec2-user/app/Java-springboot-project/backend
             mvn clean package -DskipTests -U
 
-      # 5️⃣ Stop old application safely
+
+      # 5️⃣ Stop old application safely (Fixed 143 Error)
       - name: Stop Old Application
         uses: appleboy/ssh-action@v1.1.0
         with:
@@ -67,22 +72,33 @@ jobs:
           key: ${{ secrets.EC2_KEY }}
           script_stop: false
           script: |
-            PIDS=$(pgrep -f "java.*datastore-0.0.7.jar" || true)
-            
+            echo "Stopping old application..."
+
+            PIDS=$(pgrep -f "datastore-0.0.7.jar" || true)
+
             if [ -n "$PIDS" ]; then
               echo "Stopping application PIDs: $PIDS"
-              kill $PIDS || true
+
+              for PID in $PIDS; do
+                kill -15 $PID || true
+              done
+
               sleep 5
-              
+
               for PID in $PIDS; do
                 if ps -p $PID > /dev/null; then
                   echo "Force killing PID $PID"
                   kill -9 $PID || true
                 fi
               done
+
+              echo "Application stopped"
             else
               echo "No running application found"
             fi
+
+            exit 0
+
 
       # 6️⃣ Start new application
       - name: Start Application
@@ -93,12 +109,12 @@ jobs:
           key: ${{ secrets.EC2_KEY }}
           script: |
             LOG_DIR=/var/log/app
-            
+
             sudo mkdir -p $LOG_DIR
             sudo chown ec2-user:ec2-user $LOG_DIR
-            
+
             cd /home/ec2-user/app/Java-springboot-project/backend/target
-            
+
             nohup env \
               MYSQL_HOST=${{ secrets.DB_HOST }} \
               MYSQL_PORT=3306 \
@@ -108,6 +124,9 @@ jobs:
               java -jar datastore-0.0.7.jar \
               --server.port=8084 \
               > $LOG_DIR/nohup.out 2>&1 &
+
+            echo "Application started"
+
 
       # 7️⃣ Wait for app startup
       - name: Wait for App Startup
@@ -120,7 +139,8 @@ jobs:
             echo "Waiting for application to start..."
             sleep 40
 
-      # 8️⃣ Verify Application Running (Simple Check)
+
+      # 8️⃣ Verify Application Running
       - name: Verify Application
         uses: appleboy/ssh-action@v1.1.0
         with:
@@ -129,7 +149,7 @@ jobs:
           key: ${{ secrets.EC2_KEY }}
           script: |
             echo "Checking if application is running..."
-            
+
             if pgrep -f "datastore-0.0.7.jar" > /dev/null
             then
               echo "✅ Application started successfully"

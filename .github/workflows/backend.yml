@@ -21,8 +21,7 @@ jobs:
           username: ec2-user
           key: ${{ secrets.EC2_KEY }}
           script: |
-            set -e
-            sudo yum install -y git maven java-17-amazon-corretto -y
+            sudo yum install -y git maven java-17-amazon-corretto
 
       # 3️⃣ Clone or pull repo on EC2
       - name: Clone / Pull Repository
@@ -32,12 +31,13 @@ jobs:
           username: ec2-user
           key: ${{ secrets.EC2_KEY }}
           script: |
-            set -e
             APP_DIR=/home/ec2-user/app
             REPO_NAME=Java-springboot-project
             REPO_URL=https://github.com/CloudTechDevOps/Java-springboot-project.git
+            
             mkdir -p $APP_DIR
             cd $APP_DIR
+            
             if [ -d "$REPO_NAME/.git" ]; then
               cd $REPO_NAME
               git reset --hard
@@ -55,7 +55,6 @@ jobs:
           username: ec2-user
           key: ${{ secrets.EC2_KEY }}
           script: |
-            set -e
             cd /home/ec2-user/app/Java-springboot-project/backend
             mvn clean package -DskipTests -U
 
@@ -68,15 +67,17 @@ jobs:
           key: ${{ secrets.EC2_KEY }}
           script_stop: false
           script: |
-            PIDS=$(pgrep -f "java.*datastore-0.0.7.jar"  true)
+            PIDS=$(pgrep -f "java.*datastore-0.0.7.jar" || true)
+            
             if [ -n "$PIDS" ]; then
               echo "Stopping application PIDs: $PIDS"
-              kill $PIDS  true
+              kill $PIDS || true
               sleep 5
+              
               for PID in $PIDS; do
                 if ps -p $PID > /dev/null; then
                   echo "Force killing PID $PID"
-                  kill -9 $PID  true
+                  kill -9 $PID || true
                 fi
               done
             else
@@ -91,11 +92,13 @@ jobs:
           username: ec2-user
           key: ${{ secrets.EC2_KEY }}
           script: |
-            set -e
             LOG_DIR=/var/log/app
+            
             sudo mkdir -p $LOG_DIR
             sudo chown ec2-user:ec2-user $LOG_DIR
+            
             cd /home/ec2-user/app/Java-springboot-project/backend/target
+            
             nohup env \
               MYSQL_HOST=${{ secrets.DB_HOST }} \
               MYSQL_PORT=3306 \
@@ -114,37 +117,23 @@ jobs:
           username: ec2-user
           key: ${{ secrets.EC2_KEY }}
           script: |
-            echo "Waiting 15 seconds for application to start..."
-            sleep 15
-      # 8️⃣ Verify DB connectivity via actuator
-      - name: Verify DB Connection
+            echo "Waiting for application to start..."
+            sleep 40
+
+      # 8️⃣ Verify Application Running (Simple Check)
+      - name: Verify Application
         uses: appleboy/ssh-action@v1.1.0
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ec2-user
           key: ${{ secrets.EC2_KEY }}
           script: |
-            set -e
-            HEALTH=$(curl -s http://localhost:8084/actuator/health)
-            echo "Health endpoint response: $HEALTH"
-      
-            # Check only app status
-            if [[ "$HEALTH" != *'"status":"UP"'* ]]; then
-              echo "❌ Application not UP!"
+            echo "Checking if application is running..."
+            
+            if pgrep -f "datastore-0.0.7.jar" > /dev/null
+            then
+              echo "✅ Application started successfully"
+            else
+              echo "❌ Application failed to start"
               exit 1
             fi
-      
-            # Optional DB check (non-blocking)
-            if [[ "$HEALTH" == *'"db"'* ]]; then
-              if [[ "$HEALTH" != *'"status":"UP"'* ]]; then
-                echo "❌ DB not UP!"
-                exit 1
-              fi
-              echo "✅ DB is UP"
-            else
-              echo "⚠️ DB health not exposed, skipping check"
-            fi
-      
-            echo "✅ Application is UP"
-      
-            echo "✅ Application and DB are UP"

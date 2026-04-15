@@ -4,7 +4,6 @@ This GitHub Actions workflow automates the build and deployment process for the 
 
 ## Overview
 
-
 The pipeline performs the following steps:
 1. Checkout source code
 2. Setup Java 17
